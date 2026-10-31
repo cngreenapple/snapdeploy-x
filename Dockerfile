@@ -9,12 +9,14 @@ RUN apk add --no-cache curl unzip caddy && \
     rm /tmp/xray.zip && \
     apk del curl unzip
 
-COPY xray-docker/config.json /etc/xray/config.json
-COPY Caddyfile /etc/caddy/Caddyfile
+COPY xray-docker/config.json.tpl /etc/xray/config.json.tpl
+COPY Caddyfile.tpl /etc/caddy/Caddyfile.tpl
+COPY panel /panel
 COPY start.sh /start.sh
 
 WORKDIR /app
 COPY public /app/public
+RUN mkdir -p /app/panel
 
 RUN chmod +x /start.sh
 

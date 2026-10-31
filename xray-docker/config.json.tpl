@@ -5,13 +5,13 @@
       "port": 3000,
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c" }],
+        "clients": [{ "id": "__UUID__" }],
         "decryption": "none",
         "fallbacks": [
           { "dest": 3001 },
-          { "path": "/vless-aero", "dest": 3002 },
-          { "path": "/vmess-aero", "dest": 3003 },
-          { "path": "/trojan-aero", "dest": 3004 }
+          { "path": "__PATH_VLESS__", "dest": 3002 },
+          { "path": "__PATH_VMESS__", "dest": 3003 },
+          { "path": "__PATH_TROJAN__", "dest": 3004 }
         ]
       },
       "streamSettings": { "network": "tcp" }
@@ -20,29 +20,29 @@
       "port": 3001,
       "listen": "127.0.0.1",
       "protocol": "vless",
-      "settings": { "clients": [{ "id": "f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c" }], "decryption": "none" },
+      "settings": { "clients": [{ "id": "__UUID__" }], "decryption": "none" },
       "streamSettings": { "network": "tcp", "security": "none" }
     },
     {
       "port": 3002,
       "listen": "127.0.0.1",
       "protocol": "vless",
-      "settings": { "clients": [{ "id": "f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c" }], "decryption": "none" },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/vless-aero" } }
+      "settings": { "clients": [{ "id": "__UUID__" }], "decryption": "none" },
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "__PATH_VLESS__" } }
     },
     {
       "port": 3003,
       "listen": "127.0.0.1",
       "protocol": "vmess",
-      "settings": { "clients": [{ "id": "f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c", "alterId": 0 }] },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/vmess-aero" } }
+      "settings": { "clients": [{ "id": "__UUID__", "alterId": 0 }] },
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "__PATH_VMESS__" } }
     },
     {
       "port": 3004,
       "listen": "127.0.0.1",
       "protocol": "trojan",
-      "settings": { "clients": [{ "password": "f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c" }] },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/trojan-aero" } }
+      "settings": { "clients": [{ "password": "__UUID__" }] },
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "__PATH_TROJAN__" } }
     }
   ],
   "dns": { "servers": ["https+local://8.8.8.8/dns-query"] },

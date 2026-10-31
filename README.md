@@ -1,52 +1,57 @@
-# 🚀 AeroTunnel
+# 🚀 SnapDeploy
 
-VPN tunnel gateway — **Xray-core** + **Caddy** reverse proxy. Deploy on Railway or self-host via Docker.
+Edge static hosting front end (Caddy) + private tunnel transport (Xray-core). Deploy on Railway or self-host via Docker.
+
+Public surface is a plain static-hosting landing page. The admin console and the tunnel transports live on non-obvious paths.
 
 ## Architecture
 
 ```
-Client → Railway:8080 → Caddy → Xray (VLESS/VMess/Trojan WS) → Internet
+Client → :8080 → Caddy ─┬─ /                     static landing page (decoy)
+                        ├─ /assets/js/runtime.*  WebSocket transport → Xray
+                        └─ /_console             admin console (not under static root)
 ```
-
-- **Caddy** serves dashboard (static), reverse proxy WebSocket ke Xray
-- **Xray-core** handles protocol encryption/decryption
 
 ## Paths
 
-| Path | Protocol |
-|------|----------|
-| `/vless-aero` | VLESS WebSocket |
-| `/vmess-aero` | VMess WebSocket |
-| `/trojan-aero` | Trojan WebSocket |
+Semua path di bawah ini bisa diganti lewat env var. Default:
 
-## UUID
+| Env | Default | Fungsi |
+|-----|---------|--------|
+| `PANEL_PATH` | `/_console` | Admin console |
+| `PATH_VLESS` | `/assets/js/runtime.vless` | VLESS WebSocket |
+| `PATH_VMESS` | `/assets/js/runtime.vmess` | VMess WebSocket |
+| `PATH_TROJAN` | `/assets/js/runtime.trojan` | Trojan WebSocket |
+| `UUID` | `f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c` | Client ID / trojan password |
+| `PANEL_USER` / `PANEL_PASS` | `aero` / `aero` | Login console |
 
-`f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c`
+Set `UUID`, `PANEL_PATH`, `PANEL_USER`, `PANEL_PASS` di Railway → Variables. Kalau tidak diset, default di atas dipakai (ganti sebelum deploy publik).
 
-## Login
+## How masking works
 
-| Field | Value |
-|-------|-------|
-| Username | `aero` |
-| Password | `aero` |
+- `/` dan path lain yang tidak dikenal menyajikan halaman statis biasa (bukan dashboard).
+- Path transport memakai nama aset (`/assets/js/runtime.*`) — tidak menyebut nama protokol.
+- Console ada di `PANEL_PATH`, filenya di `/app/panel`, di luar root statis, jadi tidak bisa diakses lewat `/panel/...`.
+- Semua secret di-inject saat container start oleh `start.sh`; file template tidak berisi kredensial nyata.
 
 ## Deployment
 
 ### Railway
 
-1. Fork repo to GitHub
-2. Create Railway project → Deploy from GitHub
-3. Set region to **Singapore**
-4. Open generated domain → login → dashboard
+1. Fork repo → Railway → Deploy from GitHub
+2. Set region **Singapore**
+3. Set Variables: `UUID`, `PANEL_PATH`, `PANEL_USER`, `PANEL_PASS`
+4. Buka `https://<domain><PANEL_PATH>/` → login
 
 ### Docker (self-hosted)
 
 ```bash
-docker pull ghcr.io/cngreenapple/aerotunnel:latest
-docker run -d -p 8080:8080 --name aerotunnel ghcr.io/cngreenapple/aerotunnel:latest
+docker run -d -p 8080:8080 \
+  -e UUID=<uuid> -e PANEL_PATH=/_console -e PANEL_USER=<user> -e PANEL_PASS=<pass> \
+  --name snapdeploy ghcr.io/cngreenapple/snapdeploy-x:latest
 ```
 
-Akses `http://localhost:8080`, login `aero:aero`.
+Buka `http://localhost:8080/_console/`, login.
 
 ### GitHub Actions (CI/CD)
 
@@ -55,65 +60,67 @@ Tiap push ke `main` otomatis build & push ke ghcr.io via [workflow](.github/work
 ## Dashboard
 
 - Dark/light theme toggle
-- Config generator: URI + QR code + full Clash YAML (with DNS, proxy-groups, rules)
-- Expand/collapse YAML preview, Copy & Download buttons
+- Config generator: URI + QR code + full Clash YAML (DNS, proxy-groups, rules)
+- Expand/collapse YAML preview, Copy & Download
 
 ## Files
 
 | File | Role |
 |------|------|
-| `xray-docker/config.json` | Xray config (inbounds, fallbacks, DNS) |
-| `Caddyfile` | Caddy config: reverse proxy, healthcheck, static files |
-| `start.sh` | Entrypoint: start Xray background + Caddy foreground |
-| `public/index.html` | Web dashboard with built-in login |
+| `xray-docker/config.json.tpl` | Xray config template (inbounds, fallbacks, DNS) |
+| `Caddyfile.tpl` | Caddy template: transport routes, console, static |
+| `panel/index.html.tpl` | Console UI template |
+| `public/index.html` | Landing page (decoy) |
+| `start.sh` | Entrypoint: render templates from env, start Xray + Caddy |
 | `Dockerfile` | Build: install Caddy + Xray on Alpine |
 
 ## Client Config
 
-Semua config pake **WebSocket (WS)** — kompatibel dengan semua klien.
+Semua config pake **WebSocket (WS)**. Nilai `<path>` = env `PATH_*` yang dipakai.
 
 ### VLESS (WS)
 
 | Field | Value |
 |-------|-------|
-| Address | your-domain.railway.app |
+| Address | your-domain |
 | Port | 443 |
-| UUID | `f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c` |
+| UUID | env `UUID` |
 | Encryption | `none` |
 | Network | `ws` |
-| Path | `/vless-aero` |
+| Path | `/assets/js/runtime.vless` |
 | TLS | `tls` |
-| SNI | your-domain.railway.app |
+| SNI | your-domain |
 | Fingerprint | `firefox` |
 
 ### VMess (WS)
 
 | Field | Value |
 |-------|-------|
-| Address | your-domain.railway.app |
+| Address | your-domain |
 | Port | 443 |
-| UUID | `f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c` |
+| UUID | env `UUID` |
 | AlterID | `0` |
 | Security | `auto` |
 | Network | `ws` |
-| Path | `/vmess-aero` |
+| Path | `/assets/js/runtime.vmess` |
 | TLS | `tls` |
-| SNI | your-domain.railway.app |
+| SNI | your-domain |
 | Fingerprint | `firefox` |
 
 ### Trojan (WS)
 
 | Field | Value |
 |-------|-------|
-| Address | your-domain.railway.app |
+| Address | your-domain |
 | Port | 443 |
-| Password | `f3b7c97d-4a53-4b54-a1d5-84d9df4fd91c` |
+| Password | env `UUID` |
 | Network | `ws` |
-| Path | `/trojan-aero` |
+| Path | `/assets/js/runtime.trojan` |
 | TLS | `tls` |
-| SNI | your-domain.railway.app |
+| SNI | your-domain |
 | Fingerprint | `firefox` |
 
 ---
 
-*AeroTunnel — Premium Tunneling Backend*
+*SnapDeploy — Static hosting edge*
+
