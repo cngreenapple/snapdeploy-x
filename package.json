@@ -1,0 +1,14 @@
+{
+  "name": "snapdeploy-x",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hybrid tunnel gateway",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "ws": "^8.18.0"
+  }
+}
