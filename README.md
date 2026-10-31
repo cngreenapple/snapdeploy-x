@@ -18,6 +18,22 @@ docker build -t snapdeploy-x .
 docker run -d -p 3000:3000 --name snapdeploy-x snapdeploy-x
 ```
 
+### GHCR (GitHub Actions)
+
+Push ke `main` otomatis build & push image lewat [workflow](.github/workflows/docker-build.yml):
+
+```
+ghcr.io/cngreenapple/snapdeploy-x:latest
+ghcr.io/cngreenapple/snapdeploy-x:<commit-sha>
+```
+
+Kalau package masih private, login dulu:
+
+```bash
+echo $GITHUB_TOKEN | docker login ghcr.io -u <username> --password-stdin
+docker run -d -p 3000:3000 ghcr.io/cngreenapple/snapdeploy-x:latest
+```
+
 ## Env
 
 | Var | Default | Fungsi |
