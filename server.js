@@ -1,677 +1,751 @@
-#!/usr/bin/env node
-
-const http = require('http');
 const WebSocket = require('ws');
 const net = require('net');
 const dgram = require('dgram');
+const http = require('http');
 const url = require('url');
-const axios = require('axios');
-const os = require('os');
-const fs = require('fs');
-const path = require('path');
-const { promisify } = require('util');
-const exec = promisify(require('child_process').exec);
 
-// ==================== ENVIRONMENT VARIABLES ====================
-const FILE_PATH = process.env.FILE_PATH || '.tmp';
-const PORT = process.env.PORT || 3000;
-const UUID = process.env.UUID || '9afd1229-b893-40c1-84dd-51e7ce204913';
-const ARGO_DOMAIN = process.env.ARGO_DOMAIN || '';
-const ARGO_AUTH = process.env.ARGO_AUTH || '';
-const ARGO_PORT = process.env.ARGO_PORT || 8001;
-const CFIP = process.env.CFIP || 'bug.com';
-const CFPORT = process.env.CFPORT || 443;
-const NAME = process.env.NAME || 'MEDIAFAIRY';
+// Constants
+const horse = Buffer.from("dHJvamFu", 'base64').toString(); // "trojan"
+const flash = Buffer.from("dm1lc3M=", 'base64').toString(); // "vmess/vless"
 
-// ==================== GLOBAL CONSTANTS ====================
-const horse = Buffer.from("dHJvamFu", 'base64').toString(); 
-const flash = Buffer.from("dm1lc3M=", 'base64').toString(); 
 const WS_READY_STATE_OPEN = 1;
 
-let argoConfigs = { vless: '', vmess: '', trojan: '' };
-const generateRandomName = () => Math.random().toString(36).substring(2, 8);
-const webName = generateRandomName();
-const botName = generateRandomName();
-const webPath = path.join(FILE_PATH, webName);
-const botPath = path.join(FILE_PATH, botName);
-const subFilePath = path.join(FILE_PATH, 'sub.txt');
-const bootLogPath = path.join(FILE_PATH, 'boot.log');
+// ==================== ENVIRONMENT ====================
+// Every path is normalized to look like a static asset route.
+const asRoute = (value, fallback) => {
+  const raw = (value || '').trim().replace(/\/+$/, '');
+  if (!raw) return fallback;
+  return raw.startsWith('/') ? raw : '/' + raw;
+};
 
-// ==================== BACKGROUND SERVICES (XRAY & ARGO) ====================
-if (!fs.existsSync(FILE_PATH)) fs.mkdirSync(FILE_PATH, { recursive: true });
+const UUID = process.env.UUID || '9afd1229-b893-40c1-84dd-51e7ce204913';
+const NODE_NAME = process.env.NODE_NAME || 'NODE-1';
+const SITE_NAME = process.env.SITE_NAME || 'Studio Nord';
+const CONSOLE_PATH = asRoute(process.env.CONSOLE_PATH, '/assets/js/app');
+const ROUTE_A = asRoute(process.env.ROUTE_A, '/assets/js/runtime.min.js');
+const ROUTE_B = asRoute(process.env.ROUTE_B, '/assets/js/vendor.chunk.js');
 
-async function generateXrayConfig() {
-  const config = {
-    log: { access: '/dev/null', error: '/dev/null', loglevel: 'none' },
-    inbounds: [
-      { port: ARGO_PORT, protocol: 'vless', settings: { clients: [{ id: UUID, flow: 'xtls-rprx-vision' }], decryption: 'none', fallbacks: [{ dest: 3001 }, { path: "/vless-mediafairy", dest: 3002 }, { path: "/vmess-mediafairy", dest: 3003 }, { path: "/trojan-mediafairy", dest: 3004 }] }, streamSettings: { network: 'tcp' } },
-      { port: 3001, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID }], decryption: "none" }, streamSettings: { network: "tcp", security: "none" } },
-      { port: 3002, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID, level: 0 }], decryption: "none" }, streamSettings: { network: "ws", security: "none", wsSettings: { path: "/vless-mediafairy" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
-      { port: 3003, listen: "127.0.0.1", protocol: "vmess", settings: { clients: [{ id: UUID, alterId: 0 }] }, streamSettings: { network: "ws", wsSettings: { path: "/vmess-mediafairy" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
-      { port: 3004, listen: "127.0.0.1", protocol: "trojan", settings: { clients: [{ password: UUID }] }, streamSettings: { network: "ws", security: "none", wsSettings: { path: "/trojan-mediafairy" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
-    ],
-    dns: { servers: ["https+local://8.8.8.8/dns-query"] },
-    outbounds: [{ protocol: "freedom", tag: "direct" }, { protocol: "blackhole", tag: "block" }]
-  };
-  fs.writeFileSync(path.join(FILE_PATH, 'config.json'), JSON.stringify(config, null, 2));
-}
-
-function downloadFile(fileUrl, filePath) {
-  return new Promise((resolve, reject) => {
-    const writer = fs.createWriteStream(filePath);
-    axios({ method: 'get', url: fileUrl, responseType: 'stream' })
-      .then(response => {
-        response.data.pipe(writer);
-        writer.on('finish', () => resolve(filePath));
-        writer.on('error', reject);
-      }).catch(reject);
-  });
-}
-
-async function startBackgroundServices() {
-  const arch = os.arch() === 'arm' || os.arch() === 'arm64' || os.arch() === 'aarch64' ? 'arm64' : 'amd64';
-  const baseUrl = `https://${arch}.ssss.nyc.mn`;
-  
-  await generateXrayConfig();
-  
-  try {
-    await Promise.all([
-      downloadFile(`${baseUrl}/web`, webPath),
-      downloadFile(`${baseUrl}/bot`, botPath)
-    ]);
-    
-    fs.chmodSync(webPath, 0o775);
-    fs.chmodSync(botPath, 0o775);
-
-    exec(`nohup ${webPath} -c ${FILE_PATH}/config.json >/dev/null 2>&1 &`);
-    console.log('[SYSTEM] Xray Engine Started');
-
-    let tunnelArgs = `tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${bootLogPath} --loglevel info --url http://localhost:${ARGO_PORT}`;
-    if (ARGO_AUTH && ARGO_AUTH.match(/^[A-Z0-9a-z=]{120,250}$/)) {
-        tunnelArgs = `tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}`;
-    }
-    
-    exec(`nohup ${botPath} ${tunnelArgs} >/dev/null 2>&1 &`);
-    console.log('[SYSTEM] Tunnel Bot Started');
-    
-    setTimeout(extractDomains, 5000);
-  } catch (err) {
-    console.error('[SYSTEM] Background service error:', err.message);
-  }
-}
-
-async function extractDomains() {
-  if (ARGO_AUTH && ARGO_DOMAIN) {
-    await generateLinks(ARGO_DOMAIN);
-    return;
-  }
-  try {
-    const logData = fs.readFileSync(bootLogPath, 'utf-8');
-    const match = logData.match(/https?:\/\/([^ ]*trycloudflare\.com)\/?/);
-    if (match) {
-      console.log('[SYSTEM] Argo Tunnel Extracted:', match[1]);
-      await generateLinks(match[1]);
-    } else {
-      setTimeout(extractDomains, 3000); 
-    }
-  } catch (e) {
-    setTimeout(extractDomains, 3000);
-  }
-}
-
-async function generateLinks(domain) {
-  const vmessObj = { v: '2', ps: `${NAME}-CDN-VMESS`, add: CFIP, port: CFPORT, id: UUID, aid: '0', scy: 'auto', net: 'ws', type: 'none', host: domain, path: '/vmess-mediafairy', tls: 'tls', sni: domain, alpn: '', fp: 'firefox' };
-  
-  argoConfigs.vless = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${domain}&fp=firefox&type=ws&host=${domain}&path=%2Fvless-mediafairy#${NAME}-CDN-VLESS`;
-  argoConfigs.vmess = `vmess://${Buffer.from(JSON.stringify(vmessObj)).toString('base64')}`;
-  argoConfigs.trojan = `trojan://${UUID}@${CFIP}:${CFPORT}?security=tls&sni=${domain}&fp=firefox&type=ws&host=${domain}&path=%2Ftrojan-mediafairy#${NAME}-CDN-TROJAN`;
-  
-  const subTxt = `${argoConfigs.vless}\n${argoConfigs.vmess}\n${argoConfigs.trojan}`;
-  fs.writeFileSync(subFilePath, subTxt);
-  console.log('[SYSTEM] Argo Subscriptions generated successfully.');
-}
-
-// ==================== HYBRID GATEWAY SERVER ====================
-class HybridServer {
+class GatewayServer {
   constructor() {
     this.wss = null;
     this.httpServer = null;
     this.activeUDPConnections = new Map();
-    this.stats = { rx: 0, tx: 0 };
-    this.lastCpu = null;
+
+    // In-Memory Bandwidth Tracker
+    this.stats = {
+      rx: 0, // Received from VPN Client (Upload)
+      tx: 0  // Sent to VPN Client (Download)
+    };
   }
+
+  // ==================== HTTP HANDLERS & DASHBOARD ====================
 
   async handleHttpRequest(req, res) {
     const parsedUrl = url.parse(req.url, true);
-    
-    // API Statistik (GLOBAL TRAFFIC + CPU + RAM)
-    if (parsedUrl.pathname === '/api/stats') {
-      let currentRx = this.stats.rx;
-      let currentTx = this.stats.tx;
+    const pathname = parsedUrl.pathname;
 
-      // Baca Trafik Linux
-      try {
-        if (fs.existsSync('/proc/net/dev')) {
-          const devData = fs.readFileSync('/proc/net/dev', 'utf-8');
-          const lines = devData.split('\n');
-          let sysRx = 0, sysTx = 0;
-          for (let i = 2; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line || line.startsWith('lo:')) continue; 
-            const parts = line.split(/:?\s+/);
-            if (parts.length > 9) {
-              sysRx += parseInt(parts[1] || 0, 10);
-              sysTx += parseInt(parts[9] || 0, 10);
-            }
-          }
-          if (sysRx > 0 || sysTx > 0) { currentRx = sysRx; currentTx = sysTx; }
-        }
-      } catch (e) {}
+    if (pathname === CONSOLE_PATH) {
+      res.writeHead(308, { 'Location': CONSOLE_PATH + '/' });
+      res.end();
+      return;
+    }
 
-      // Kalkulasi CPU
-      const cpus = os.cpus();
-      let user = 0, nice = 0, sys = 0, idle = 0, irq = 0;
-      for (let cpu in cpus) {
-        user += cpus[cpu].times.user; nice += cpus[cpu].times.nice;
-        sys += cpus[cpu].times.sys; idle += cpus[cpu].times.idle;
-        irq += cpus[cpu].times.irq;
-      }
-      const totalCpu = user + nice + sys + idle + irq;
-      if (!this.lastCpu) this.lastCpu = { idle, total: totalCpu };
-      const idleDelta = idle - this.lastCpu.idle;
-      const totalDelta = totalCpu - this.lastCpu.total;
-      const cpuUsage = totalDelta === 0 ? 0 : (100 - (100 * idleDelta / totalDelta)).toFixed(1);
-      this.lastCpu = { idle, total: totalCpu };
-
-      // Kalkulasi RAM
-      const totalMem = os.totalmem();
-      const freeMem = os.freemem();
-      const ramUsage = ((totalMem - freeMem) / totalMem * 100).toFixed(1);
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+    if (pathname === CONSOLE_PATH + '/api/stats') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({
         uptime: Math.floor(process.uptime()),
-        rx: currentRx,
-        tx: currentTx,
-        cpu: parseFloat(cpuUsage),
-        ram: parseFloat(ramUsage)
+        rx: this.stats.rx,
+        tx: this.stats.tx
       }));
       return;
     }
 
-    // API Config Terpusat
-    if (parsedUrl.pathname === '/api/config') {
-      const host = req.headers.host;
-      const payload = {
-        native: {
-          vless: `vless://${UUID}@${host}:443?encryption=none&security=tls&sni=${host}&fp=firefox&type=ws&host=${host}&path=%2Fvless-mediafairy#${NAME}-SNI-VLESS`,
-          trojan: `trojan://${UUID}@${host}:443?security=tls&sni=${host}&fp=firefox&type=ws&host=${host}&path=%2Ftrojan-mediafairy#${NAME}-SNI-TROJAN`
-        },
-        argo: {
-          vless: argoConfigs.vless || 'Menunggu Cloudflare Argo Tunnel aktif...',
-          vmess: argoConfigs.vmess || 'Menunggu Cloudflare Argo Tunnel aktif...',
-          trojan: argoConfigs.trojan || 'Menunggu Cloudflare Argo Tunnel aktif...'
-        }
-      };
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(payload));
-    }
-
-    // Dashboard UI Utama
-    if (parsedUrl.pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(`
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>GATEWAY CORE</title>
-          <style>
-            :root {
-              --bg-black: #000000;
-              --panel-bg: #0a0a0a;
-              --card-bg: #050505;
-              --border-color: #1f1f1f;
-              --border-hover: #333333;
-              --text-main: #ffffff;
-              --text-muted: #888888;
-              --accent-blue: #0088FF;
-              --accent-cyan: #00ffff;
-              --accent-purple: #a855f7;
-              --accent-pink: #ff0080;
-              --status-green: #00df89;
-              --status-red: #ff5f56;
-            }
-
-            * { box-sizing: border-box; margin: 0; padding: 0; }
-
-            body {
-              background-color: var(--bg-black);
-              color: var(--text-main);
-              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-              min-height: 100vh;
-              display: flex;
-              flex-direction: column;
-              align-items: center;
-              padding: 6vh 24px;
-            }
-
-            .window-container {
-              width: 100%;
-              max-width: 680px;
-              background-color: var(--panel-bg);
-              border: 1px solid var(--border-color);
-              border-radius: 12px;
-              box-shadow: 0 30px 60px rgba(0, 0, 0, 0.8);
-              overflow: hidden;
-            }
-
-            .window-header {
-              background-color: var(--card-bg);
-              border-bottom: 1px solid var(--border-color);
-              padding: 14px 20px;
-              display: flex;
-              align-items: center;
-              justify-content: space-between;
-            }
-
-            .mac-dots { display: flex; gap: 8px; }
-            .dot { width: 12px; height: 12px; border-radius: 50%; opacity: 0.75; }
-            .dot.close { background-color: #ff5f56; }
-            .dot.minimize { background-color: #ffbd2e; }
-            .dot.zoom { background-color: #27c93f; }
-
-            .brand-title { font-size: 0.8rem; font-weight: 700; letter-spacing: 3px; text-transform: uppercase; }
-            .brand-media { color: #ffffff; }
-            .brand-fairy { color: var(--accent-blue); }
-
-            .status-badge { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 600; color: var(--status-green); }
-            .pulse-dot {
-              width: 6px; height: 6px; background-color: var(--status-green);
-              border-radius: 50%; box-shadow: 0 0 8px var(--status-green);
-              animation: ambientPulse 2.5s infinite ease-in-out;
-            }
-
-            .window-content { padding: 32px; }
-
-            .uptime-section { text-align: center; padding-bottom: 24px; border-bottom: 1px solid var(--border-color); margin-bottom: 24px; }
-            .section-label { font-size: 0.65rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 2px; margin-bottom: 6px; }
-            .uptime-display { font-size: 2.5rem; font-weight: 800; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
-
-            /* 4 Columns Grid */
-            .stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
-            .card { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; position: relative; overflow: hidden; }
-            .card-value { font-size: 1.25rem; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
-            .live-speed { font-size: 0.75rem; font-family: monospace; font-weight: 600; margin-top: 6px; }
-            .live-speed.down { color: var(--status-green); }
-            .live-speed.up { color: var(--accent-blue); }
-            .resource-bar { width: 100%; height: 3px; background-color: #222; position: absolute; bottom: 0; left: 0; }
-            .resource-fill { height: 100%; background-color: var(--accent-cyan); transition: width 1s ease; }
-
-            /* Live Chart */
-            .chart-card { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; margin-bottom: 32px; }
-            .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-            .legend { display: flex; gap: 12px; font-size: 0.7rem; color: var(--text-muted); font-weight: 600; }
-            .legend-item { display: flex; align-items: center; gap: 4px; }
-            .legend-color { width: 8px; height: 8px; border-radius: 50%; }
-            .c-down { background-color: var(--status-green); box-shadow: 0 0 5px var(--status-green); }
-            .c-up { background-color: var(--accent-blue); box-shadow: 0 0 5px var(--accent-blue); }
-            .canvas-container { width: 100%; height: 120px; position: relative; }
-            canvas { width: 100%; height: 100%; display: block; }
-
-            .generator-section { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px; }
-            .group-title { font-size: 0.75rem; font-weight: 600; color: var(--text-main); margin-bottom: 10px; border-left: 2px solid var(--border-hover); padding-left: 8px; }
-            
-            .btn-group-native { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
-            .btn-group-argo { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 20px; }
-            
-            button { background-color: #111; color: #fff; border: 1px solid var(--border-color); padding: 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: all 0.2s ease; }
-            button:hover { background-color: #222; border-color: #444; }
-            button:active { transform: scale(0.98); }
-            .btn-vless:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
-            .btn-vmess:hover { border-color: var(--accent-purple); color: var(--accent-purple); }
-            .btn-trojan:hover { border-color: var(--accent-pink); color: var(--accent-pink); }
-
-            .output-wrapper { display: flex; gap: 8px; margin-top: 10px; border-top: 1px solid var(--border-color); padding-top: 20px; }
-            input[type="text"] { flex: 1; background-color: #000; border: 1px solid var(--border-color); color: var(--status-green); padding: 12px 16px; border-radius: 6px; font-family: monospace; font-size: 0.75rem; outline: none; }
-            input[type="text"]:focus { border-color: var(--border-hover); color: var(--text-main); }
-            .btn-copy { background-color: var(--text-main); color: var(--bg-black); padding: 0 20px; border: none; font-weight: 600; }
-            .btn-copy:hover { background-color: #e0e0e0; }
-
-            @media (max-width: 600px) {
-              body { padding: 4vh 16px; }
-              .stats-grid { grid-template-columns: 1fr 1fr; }
-              .output-wrapper { flex-direction: column; }
-              .btn-copy { padding: 12px; }
-            }
-
-            @keyframes ambientPulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
-          </style>
-        </head>
-        <body>
-          <div class="window-container">
-            <div class="window-header">
-              <div class="mac-dots"><div class="dot close"></div><div class="dot minimize"></div><div class="dot zoom"></div></div>
-              <div class="brand-title"><span class="brand-media">MEDIA</span><span class="brand-fairy">FAIRY</span></div>
-              <div class="status-badge"><div class="pulse-dot"></div>RUNNING</div>
-            </div>
-
-            <div class="window-content">
-              <div class="uptime-section">
-                <div class="section-label">System Uptime</div>
-                <div class="uptime-display" id="uptime-field">00:00:00</div>
-              </div>
-              
-              <div class="stats-grid">
-                <div class="card">
-                  <div class="section-label">CPU</div>
-                  <div class="card-value" id="cpu-val">0%</div>
-                  <div class="resource-bar"><div class="resource-fill" id="cpu-bar" style="width:0%"></div></div>
-                </div>
-                <div class="card">
-                  <div class="section-label">RAM</div>
-                  <div class="card-value" id="ram-val">0%</div>
-                  <div class="resource-bar"><div class="resource-fill" id="ram-bar" style="width:0%"></div></div>
-                </div>
-                <div class="card">
-                  <div class="section-label">Download</div>
-                  <div class="card-value" id="dl-total">0 B</div>
-                  <div class="live-speed down" id="dl-speed">↓ 0 B/s</div>
-                </div>
-                <div class="card">
-                  <div class="section-label">Upload</div>
-                  <div class="card-value" id="ul-total">0 B</div>
-                  <div class="live-speed up" id="ul-speed">↑ 0 B/s</div>
-                </div>
-              </div>
-
-              <div class="chart-card">
-                <div class="chart-header">
-                  <div class="section-label" style="margin:0;">Network Traffic (60s)</div>
-                  <div class="legend">
-                    <div class="legend-item"><div class="legend-color c-down"></div>RX</div>
-                    <div class="legend-item"><div class="legend-color c-up"></div>TX</div>
-                  </div>
-                </div>
-                <div class="canvas-container">
-                  <canvas id="trafficChart"></canvas>
-                </div>
-              </div>
-
-              <div class="generator-section">
-                <div class="group-title">⚡ BUG SNI</div>
-                <div class="btn-group-native">
-                  <button class="btn-vless" onclick="generate('native', 'vless')">VLESS</button>
-                  <button class="btn-trojan" onclick="generate('native', 'trojan')">TROJAN</button>
-                </div>
-                <div class="group-title">🚀 BUG CDN</div>
-                <div class="btn-group-argo">
-                  <button class="btn-vless" onclick="generate('argo', 'vless')">VLESS</button>
-                  <button class="btn-vmess" onclick="generate('argo', 'vmess')">VMESS</button>
-                  <button class="btn-trojan" onclick="generate('argo', 'trojan')">TROJAN</button>
-                </div>
-                <div class="output-wrapper">
-                  <input type="text" id="config-output" readonly placeholder="Pilih salah satu konfigurasi di atas..." />
-                  <button class="btn-copy" id="copy-btn" onclick="copyConfig()">Copy</button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <script>
-            function formatBytes(bytes) {
-              if (bytes === 0) return '0 B'; const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'], i = Math.floor(Math.log(bytes) / Math.log(k));
-              return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-            }
-            function formatTime(ts) {
-              const d = Math.floor(ts/86400), h = Math.floor((ts%86400)/3600), m = Math.floor((ts%3600)/60), s = ts%60;
-              return (d>0?d+'d ':'') + String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
-            }
-
-            // Chart Configuration
-            const canvas = document.getElementById('trafficChart');
-            const ctx = canvas.getContext('2d');
-            const maxPoints = 60;
-            let rxHistory = new Array(maxPoints).fill(0);
-            let txHistory = new Array(maxPoints).fill(0);
-            let lastRx = 0, lastTx = 0, isFirstRender = true;
-
-            function drawChart() {
-              const rect = canvas.parentElement.getBoundingClientRect();
-              canvas.width = rect.width * window.devicePixelRatio;
-              canvas.height = rect.height * window.devicePixelRatio;
-              ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-              
-              const w = rect.width; const h = rect.height;
-              ctx.clearRect(0, 0, w, h);
-
-              // Grid lines
-              ctx.strokeStyle = '#1f1f1f'; ctx.lineWidth = 1;
-              ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
-              ctx.beginPath(); ctx.moveTo(w/2, 0); ctx.lineTo(w/2, h); ctx.stroke();
-
-              const maxVal = Math.max(...rxHistory, ...txHistory, 1024); // Minimal 1KB scale
-              
-              function renderLine(data, color, shadowColor) {
-                ctx.beginPath();
-                ctx.strokeStyle = color;
-                ctx.lineWidth = 2;
-                ctx.lineCap = 'round';
-                ctx.lineJoin = 'round';
-                ctx.shadowBlur = 12;
-                ctx.shadowColor = shadowColor;
-                
-                for(let i=0; i<data.length; i++) {
-                  const x = (i / (maxPoints - 1)) * w;
-                  const y = h - ((data[i] / maxVal) * h * 0.9); // 10% padding top
-                  if(i === 0) ctx.moveTo(x, y);
-                  else ctx.lineTo(x, y);
-                }
-                ctx.stroke();
-                ctx.shadowBlur = 0; // Reset
-              }
-
-              renderLine(rxHistory, '#00df89', 'rgba(0, 223, 137, 0.5)'); // Green RX
-              renderLine(txHistory, '#0088FF', 'rgba(0, 136, 255, 0.5)'); // Blue TX
-            }
-
-            async function refreshDashboardStats() {
-              try {
-                const res = await fetch('/api/stats'); const data = await res.json();
-                
-                document.getElementById('uptime-field').innerText = formatTime(data.uptime);
-                
-                // Update CPU & RAM
-                document.getElementById('cpu-val').innerText = data.cpu + '%';
-                document.getElementById('cpu-bar').style.width = data.cpu + '%';
-                document.getElementById('cpu-bar').style.backgroundColor = data.cpu > 80 ? 'var(--status-red)' : 'var(--accent-cyan)';
-                
-                document.getElementById('ram-val').innerText = data.ram + '%';
-                document.getElementById('ram-bar').style.width = data.ram + '%';
-                document.getElementById('ram-bar').style.backgroundColor = data.ram > 85 ? 'var(--status-red)' : 'var(--accent-purple)';
-
-                // Calculate Speed
-                let rxSpeed = 0, txSpeed = 0;
-                if (!isFirstRender) {
-                  rxSpeed = Math.max(0, data.rx - lastRx);
-                  txSpeed = Math.max(0, data.tx - lastTx);
-                }
-                isFirstRender = false;
-                lastRx = data.rx; lastTx = data.tx;
-
-                // Update Text
-                document.getElementById('dl-total').innerText = formatBytes(data.rx);
-                document.getElementById('ul-total').innerText = formatBytes(data.tx);
-                document.getElementById('dl-speed').innerText = '↓ ' + formatBytes(rxSpeed) + '/s';
-                document.getElementById('ul-speed').innerText = '↑ ' + formatBytes(txSpeed) + '/s';
-
-                // Update Chart
-                rxHistory.push(rxSpeed); rxHistory.shift();
-                txHistory.push(txSpeed); txHistory.shift();
-                drawChart();
-
-              } catch (e) {}
-            }
-            
-            refreshDashboardStats(); setInterval(refreshDashboardStats, 1000);
-            window.addEventListener('resize', drawChart);
-
-            async function generate(network, protocol) {
-              const outputEl = document.getElementById('config-output');
-              outputEl.value = 'Loading...'; document.getElementById('copy-btn').innerText = 'Copy';
-              try {
-                const res = await fetch('/api/config'); const data = await res.json();
-                outputEl.value = data[network][protocol];
-              } catch (e) { outputEl.value = 'Gagal mengambil konfigurasi.'; }
-            }
-
-            function copyConfig() {
-              const el = document.getElementById('config-output');
-              if (!el.value || el.value.includes('Loading')) return; 
-              el.select(); el.setSelectionRange(0, 99999);
-              navigator.clipboard.writeText(el.value).then(() => {
-                const btn = document.getElementById('copy-btn'); btn.innerText = 'Copied!';
-                setTimeout(() => { if (btn.innerText === 'Copied!') btn.innerText = 'Copy'; }, 2000);
-              });
-            }
-          </script>
-        </body>
-        </html>
-      `);
+    if (pathname === CONSOLE_PATH + '/' || pathname === CONSOLE_PATH + '/index.html') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(this.consolePage());
       return;
     }
-    res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('Not Found');
+
+    if (pathname === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(this.sitePage());
+      return;
+    }
+
+    if (pathname === '/favicon.ico') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    // Asset routes answer plain GETs with a harmless stub so they look like real chunks
+    if (pathname === ROUTE_A || pathname === ROUTE_B) {
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600'
+      });
+      res.end('/* build:' + (pathname === ROUTE_A ? 'runtime' : 'vendor') + ' — no public export */\n');
+      return;
+    }
+
+    if (pathname === '/robots.txt') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('User-agent: *\nAllow: /\n');
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
+  }
+
+  sitePage() {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${SITE_NAME}</title>
+<meta name="description" content="${SITE_NAME} — product design and front-end engineering.">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0c0d10;color:#e8eaf0;line-height:1.6;min-height:100vh;display:flex;flex-direction:column}
+header{padding:22px 32px;border-bottom:1px solid #1c1f28;display:flex;justify-content:space-between;align-items:center}
+.brand{font-weight:700;font-size:17px;letter-spacing:-.02em}
+nav a{color:#8b93a5;text-decoration:none;font-size:14px;margin-left:22px}
+main{flex:1;display:flex;flex-direction:column;justify-content:center;max-width:640px;margin:0 auto;padding:72px 32px}
+h1{font-size:38px;line-height:1.15;letter-spacing:-.03em;margin-bottom:16px}
+p{color:#8b93a5;margin-bottom:12px}
+footer{padding:18px 32px;border-top:1px solid #1c1f28;color:#5b6275;font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<header><div class="brand">${SITE_NAME}</div><nav><a href="/work">Work</a><a href="/about">About</a></nav></header>
+<main>
+<h1>Design and front-end engineering for small teams.</h1>
+<p>We build interface systems, ship them, and keep them fast.</p>
+<p>Available for select projects.</p>
+</main>
+<footer>&copy; 2026 ${SITE_NAME}</footer>
+</body>
+</html>`;
+  }
+
+  consolePage() {
+    const config = JSON.stringify({
+      uuid: UUID,
+      name: NODE_NAME,
+      routes: [ROUTE_A, ROUTE_B],
+      base: CONSOLE_PATH
+    });
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${NODE_NAME} // SYSTEM STATUS</title>
+<style>
+:root {
+  --bg-black: #000000;
+  --panel-bg: #0a0a0a;
+  --card-bg: #000000;
+  --border-color: #1f1f1f;
+  --border-hover: #333333;
+  --text-main: #ffffff;
+  --text-muted: #888888;
+  --accent-blue: #0088FF;
+  --accent-purple: #a855f7;
+  --status-green: #00df89;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background-color: var(--bg-black);
+  color: var(--text-main);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Geist Sans", "Inter", sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
+  padding: 6vh 24px 24px 24px;
+  -webkit-font-smoothing: antialiased;
+}
+.window-container {
+  width: 100%;
+  max-width: 640px;
+  background-color: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.8);
+  overflow: hidden;
+}
+.window-header {
+  background-color: #050505;
+  border-bottom: 1px solid var(--border-color);
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.mac-dots { display: flex; gap: 8px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; opacity: 0.75; }
+.dot.close { background-color: #ff5f56; }
+.dot.minimize { background-color: #ffbd2e; }
+.dot.zoom { background-color: #27c93f; }
+.brand-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--status-green);
+  letter-spacing: 0.5px;
+}
+.pulse-dot {
+  width: 6px; height: 6px; background-color: var(--status-green);
+  border-radius: 50%; box-shadow: 0 0 8px var(--status-green);
+  animation: ambientPulse 2.5s infinite ease-in-out;
+}
+.window-content { padding: 32px; }
+.uptime-section {
+  text-align: center;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 24px;
+}
+.section-label {
+  font-size: 0.65rem; text-transform: uppercase; color: var(--text-muted);
+  letter-spacing: 2px; margin-bottom: 6px;
+}
+.uptime-display {
+  font-size: 2.5rem; font-weight: 800; letter-spacing: -1px; font-variant-numeric: tabular-nums;
+}
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+.card {
+  background-color: var(--card-bg); border: 1px solid var(--border-color);
+  border-radius: 8px; padding: 16px;
+}
+.card-value { font-size: 1.25rem; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.generator-section {
+  background-color: var(--card-bg); border: 1px solid var(--border-color);
+  border-radius: 8px; padding: 20px;
+}
+.btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+button {
+  background-color: #111; color: #fff; border: 1px solid var(--border-color);
+  padding: 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 600;
+  cursor: pointer; transition: all 0.2s ease;
+}
+button:hover { background-color: #222; border-color: #444; }
+button:active { transform: scale(0.98); }
+.btn-a:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
+.btn-b:hover { border-color: var(--accent-purple); color: var(--accent-purple); }
+.output-wrapper { display: flex; gap: 8px; border-top: 1px solid var(--border-color); padding-top: 16px; }
+input[type="text"] {
+  flex: 1; background-color: #000; border: 1px solid var(--border-color);
+  color: var(--status-green); padding: 12px 16px; border-radius: 6px;
+  font-family: monospace; font-size: 0.75rem; outline: none;
+}
+input[type="text"]:focus { border-color: var(--border-hover); color: var(--text-main); }
+.btn-copy { background-color: var(--text-main); color: var(--bg-black); padding: 0 20px; border: none; font-weight: 600; }
+.btn-copy:hover { background-color: #e0e0e0; }
+@media (max-width: 540px) {
+  body { padding: 4vh 16px 16px 16px; }
+  .window-content { padding: 24px; }
+  .stats-grid { grid-template-columns: 1fr; gap: 16px; }
+  .uptime-display { font-size: 2.25rem; }
+  .output-wrapper { flex-direction: column; }
+  .btn-copy { padding: 12px; }
+}
+@keyframes ambientPulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+</style>
+</head>
+<body>
+
+  <div class="window-container">
+    <div class="window-header">
+      <div class="mac-dots">
+        <div class="dot close"></div>
+        <div class="dot minimize"></div>
+        <div class="dot zoom"></div>
+      </div>
+      <div class="brand-title">${NODE_NAME}</div>
+      <div class="status-badge">
+        <div class="pulse-dot"></div>
+        RUNNING
+      </div>
+    </div>
+
+    <div class="window-content">
+      <div class="uptime-section">
+        <div class="section-label">System Uptime</div>
+        <div class="uptime-display" id="uptime-field">00:00:00</div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="card">
+          <div class="section-label">Download (TX)</div>
+          <div class="card-value" id="download-field">0 B</div>
+        </div>
+        <div class="card">
+          <div class="section-label">Upload (RX)</div>
+          <div class="card-value" id="upload-field">0 B</div>
+        </div>
+      </div>
+
+      <div class="generator-section">
+        <div class="section-label">Quick Generator</div>
+        <div class="btn-group">
+          <button class="btn-a" onclick="generateConfig(0)">PRIMARY</button>
+          <button class="btn-b" onclick="generateConfig(1)">SECONDARY</button>
+        </div>
+        <div class="output-wrapper">
+          <input type="text" id="config-output" readonly placeholder="Select a profile to generate..." />
+          <button class="btn-copy" id="copy-btn" onclick="copyConfig()">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    var CFG = ${config};
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 B';
+      var k = 1024;
+      var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      var i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function formatTime(totalSeconds) {
+      var days = Math.floor(totalSeconds / 86400);
+      var hours = Math.floor((totalSeconds % 86400) / 3600);
+      var minutes = Math.floor((totalSeconds % 3600) / 60);
+      var seconds = totalSeconds % 60;
+      var timeString = '';
+      if (days > 0) timeString += days + 'd ';
+      timeString += String(hours).padStart(2, '0') + ':';
+      timeString += String(minutes).padStart(2, '0') + ':';
+      timeString += String(seconds).padStart(2, '0');
+      return timeString;
+    }
+
+    async function refreshDashboardStats() {
+      try {
+        var response = await fetch(CFG.base + '/api/stats');
+        var statsData = await response.json();
+        document.getElementById('uptime-field').innerText = formatTime(statsData.uptime);
+        document.getElementById('download-field').innerText = formatBytes(statsData.tx);
+        document.getElementById('upload-field').innerText = formatBytes(statsData.rx);
+      } catch (error) {}
+    }
+
+    refreshDashboardStats();
+    setInterval(refreshDashboardStats, 1000);
+
+    function generateConfig(index) {
+      var host = window.location.hostname;
+      var route = CFG.routes[index];
+      var label = CFG.name + '-' + (index === 0 ? 'A' : 'B');
+      var query = 'security=tls&sni=' + host + '&type=ws&host=' + host +
+                  '&path=' + encodeURIComponent(route) + '#' + label;
+      var uri = index === 0
+        ? 'vless://' + CFG.uuid + '@' + host + ':443?encryption=none&' + query
+        : 'trojan://' + CFG.uuid + '@' + host + ':443?' + query;
+
+      document.getElementById('config-output').value = uri;
+      document.getElementById('copy-btn').innerText = 'Copy';
+    }
+
+    function copyConfig() {
+      var copyText = document.getElementById('config-output');
+      if (!copyText.value) return;
+      copyText.select();
+      copyText.setSelectionRange(0, 99999);
+      navigator.clipboard.writeText(copyText.value).then(function () {
+        var btn = document.getElementById('copy-btn');
+        btn.innerText = 'Copied!';
+        setTimeout(function () {
+          if (btn.innerText === 'Copied!') btn.innerText = 'Copy';
+        }, 2000);
+      }).catch(function (err) {
+        console.error('Failed to copy text: ', err);
+      });
+    }
+  </script>
+</body>
+</html>`;
   }
 
   // ==================== WEBSOCKET HANDLERS ====================
+
   async handleWebSocketConnection(ws, request) {
     try {
-      const path = url.parse(request.url, true).pathname;
-      if (path === '/vless-mediafairy' || path === '/trojan-mediafairy' || path === '/vmess-mediafairy') {
-        return await this.websocketHandler(ws);
+      const parsedUrl = url.parse(request.url, true);
+      const path = parsedUrl.pathname;
+
+      if (path === ROUTE_A || path === ROUTE_B) {
+        await this.websocketHandler(ws);
+        return;
       }
-      ws.close(1000, "Invalid Path");
-    } catch (err) { ws.close(1011); }
+
+      ws.close(1000, "Invalid WebSocket path");
+    } catch (err) {
+      ws.close(1011, 'Internal server error');
+    }
   }
 
   async websocketHandler(ws) {
     let remoteSocketWrapper = { value: null };
+
     ws.on('message', async (message) => {
       try {
         const chunk = Buffer.from(message);
+
         this.stats.rx += chunk.length;
-        if (remoteSocketWrapper.value) return remoteSocketWrapper.value.write(chunk);
+
+        if (remoteSocketWrapper.value) {
+          remoteSocketWrapper.value.write(chunk);
+          return;
+        }
 
         const protocol = await this.protocolSniffer(chunk);
-        const protocolHeader = protocol === horse ? this.readHorseHeader(chunk) : this.readFlashHeader(chunk); 
+        let protocolHeader;
+
+        if (protocol === horse) {
+          protocolHeader = this.readHorseHeader(chunk);
+        } else {
+          protocolHeader = this.readFlashHeader(chunk);
+        }
+
         if (protocolHeader.hasError) throw new Error(protocolHeader.message);
 
-        if (protocolHeader.isUDP) return await this.handleUDPOutbound(protocolHeader.addressRemote, protocolHeader.portRemote, chunk.slice(protocolHeader.rawDataIndex), ws, protocolHeader.version);
-        this.handleTCPOutBound(remoteSocketWrapper, protocolHeader.addressRemote, protocolHeader.portRemote, protocolHeader.rawClientData, ws, protocolHeader.version);
-      } catch (err) { ws.close(1011, err.message); }
+        if (protocolHeader.isUDP) {
+          return await this.handleUDPOutbound(
+            protocolHeader.addressRemote,
+            protocolHeader.portRemote,
+            chunk.slice(protocolHeader.rawDataIndex),
+            ws,
+            protocolHeader.version
+          );
+        }
+
+        this.handleTCPOutBound(
+          remoteSocketWrapper,
+          protocolHeader.addressRemote,
+          protocolHeader.portRemote,
+          protocolHeader.rawClientData,
+          ws,
+          protocolHeader.version
+        );
+      } catch (err) {
+        ws.close(1011, err.message);
+      }
     });
-    ws.on('close', () => { if (remoteSocketWrapper.value) remoteSocketWrapper.value.end(); this.cleanupUDPConnections(ws); });
-    ws.on('error', () => this.cleanupUDPConnections(ws));
+
+    ws.on('close', () => {
+      if (remoteSocketWrapper.value) remoteSocketWrapper.value.end();
+      this.cleanupUDPConnections(ws);
+    });
+
+    ws.on('error', () => {
+      this.cleanupUDPConnections(ws);
+    });
   }
+
+  // ==================== PROTOCOL SNIFFERS ====================
 
   async protocolSniffer(buffer) {
     if (buffer.length >= 62) {
-      const hd = buffer.slice(56, 60);
-      if (hd[0] === 0x0d && hd[1] === 0x0a && [0x01, 0x03, 0x7f].includes(hd[2]) && [0x01, 0x03, 0x04].includes(hd[3])) return horse;
+      const horseDelimiter = buffer.slice(56, 60);
+      if (horseDelimiter[0] === 0x0d && horseDelimiter[1] === 0x0a) {
+        if ([0x01, 0x03, 0x7f].includes(horseDelimiter[2])) {
+          if ([0x01, 0x03, 0x04].includes(horseDelimiter[3])) {
+            return horse;
+          }
+        }
+      }
     }
-    return flash; 
+    return flash;
   }
 
   async handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader) {
+    const connectAndWrite = (address, port) => {
+      return new Promise((resolve, reject) => {
+        const tcpSocket = net.createConnection({ host: address, port: port }, () => {
+          tcpSocket.write(rawClientData);
+          resolve(tcpSocket);
+        });
+        tcpSocket.on('error', reject);
+      });
+    };
+
     try {
-      const tcpSocket = net.createConnection({ host: addressRemote, port: portRemote }, () => tcpSocket.write(rawClientData));
+      const tcpSocket = await connectAndWrite(addressRemote, portRemote);
       remoteSocket.value = tcpSocket;
       tcpSocket.on('close', () => webSocket.close());
       tcpSocket.on('error', () => webSocket.close());
-      
-      let header = responseHeader;
-      tcpSocket.on('data', (chunk) => {
-        this.stats.tx += chunk.length;
-        if (webSocket.readyState !== WS_READY_STATE_OPEN) return tcpSocket.destroy();
-        if (header) { webSocket.send(Buffer.concat([Buffer.from(header), chunk])); header = null; } 
-        else webSocket.send(chunk);
-      });
-    } catch (error) { webSocket.close(); }
+      this.remoteSocketToWS(tcpSocket, webSocket, responseHeader);
+    } catch (error) {
+      webSocket.close();
+    }
   }
+
+  // ==================== UDP NATIVE HANDLER ====================
 
   async handleUDPOutbound(targetAddress, targetPort, dataChunk, webSocket, responseHeader) {
     return new Promise((resolve) => {
       try {
-        let header = responseHeader;
-        const key = `${targetAddress}:${targetPort}:${Date.now()}`;
+        let protocolHeader = responseHeader;
+        const connectionKey = `${targetAddress}:${targetPort}:${Date.now()}`;
         const udpSocket = dgram.createSocket('udp4');
-        
-        this.activeUDPConnections.set(key, { socket: udpSocket, webSocket });
-        udpSocket.on('error', () => { try { udpSocket.close(); } catch (_) {} this.activeUDPConnections.delete(key); });
-        udpSocket.send(dataChunk, targetPort, targetAddress);
-        
-        udpSocket.on('message', (message) => {
-          this.stats.tx += message.length;
-          if (webSocket.readyState === WS_READY_STATE_OPEN) {
-            if (header) { webSocket.send(Buffer.concat([Buffer.from(header), message])); header = null; } 
-            else webSocket.send(message);
+
+        this.activeUDPConnections.set(connectionKey, { socket: udpSocket, webSocket: webSocket });
+
+        udpSocket.on('error', () => {
+          try { udpSocket.close(); } catch (_) {}
+          this.activeUDPConnections.delete(connectionKey);
+        });
+
+        udpSocket.send(dataChunk, targetPort, targetAddress, (error) => {
+          if (error) {
+            try { udpSocket.close(); } catch (_) {}
+            this.activeUDPConnections.delete(connectionKey);
+            return;
           }
         });
-        
-        let timeout = setTimeout(() => { try { udpSocket.close(); } catch (_) {} this.activeUDPConnections.delete(key); }, 30000);
-        udpSocket.on('message', () => { clearTimeout(timeout); timeout = setTimeout(() => { try { udpSocket.close(); } catch (_) {} this.activeUDPConnections.delete(key); }, 30000); });
+
+        udpSocket.on('message', (message) => {
+          this.stats.tx += message.length;
+
+          if (webSocket.readyState === WS_READY_STATE_OPEN) {
+            if (protocolHeader) {
+              const combined = Buffer.concat([Buffer.from(protocolHeader), message]);
+              webSocket.send(combined);
+              protocolHeader = null;
+            } else {
+              webSocket.send(message);
+            }
+          }
+        });
+
+        udpSocket.on('close', () => {
+          this.activeUDPConnections.delete(connectionKey);
+        });
+
+        let idleTimeout = setTimeout(() => {
+          if (udpSocket) {
+            try { udpSocket.close(); } catch (_) {}
+            this.activeUDPConnections.delete(connectionKey);
+          }
+        }, 30000);
+
+        udpSocket.on('message', () => {
+          clearTimeout(idleTimeout);
+          idleTimeout = setTimeout(() => {
+            if (udpSocket) {
+              try { udpSocket.close(); } catch (_) {}
+              this.activeUDPConnections.delete(connectionKey);
+            }
+          }, 30000);
+        });
+
       } catch (e) {}
     });
   }
 
   cleanupUDPConnections(webSocket) {
-    for (const [key, conn] of this.activeUDPConnections.entries()) {
-      if (conn.webSocket === webSocket) { try { conn.socket.close(); } catch (_) {} this.activeUDPConnections.delete(key); }
+    for (const [key, connection] of this.activeUDPConnections.entries()) {
+      if (connection.webSocket === webSocket) {
+        try { connection.socket.close(); } catch (_) {}
+        this.activeUDPConnections.delete(key);
+      }
     }
   }
 
   readFlashHeader(buffer) {
-    const v = buffer[0], optLen = buffer[17], cmd = buffer[18 + optLen], portIdx = 18 + optLen + 1;
-    if (cmd !== 1 && cmd !== 2) return { hasError: true, message: "cmd unsupported" };
-    const port = buffer.readUInt16BE(portIdx), addrType = buffer[portIdx + 2];
-    let addrLen = 0, addrIdx = portIdx + 3, addr = "";
-    
-    if (addrType === 1) { addrLen = 4; addr = Array.from(buffer.slice(addrIdx, addrIdx + addrLen)).join("."); }
-    else if (addrType === 2) { addrLen = buffer[addrIdx]; addrIdx++; addr = buffer.slice(addrIdx, addrIdx + addrLen).toString(); }
-    else if (addrType === 3) { addrLen = 16; addr = Array.from({length: 8}, (_, i) => buffer.readUInt16BE(addrIdx + i*2).toString(16)).join(":"); }
-    else return { hasError: true };
+    const version = buffer[0];
+    let isUDP = false;
+    const optLength = buffer[17];
+    const cmd = buffer[18 + optLength];
 
-    return { hasError: false, addressRemote: addr, portRemote: port, rawDataIndex: addrIdx + addrLen, rawClientData: buffer.slice(addrIdx + addrLen), version: Buffer.from([v, 0]), isUDP: cmd === 2 };
+    if (cmd === 2) isUDP = true;
+    else if (cmd !== 1) return { hasError: true, message: `command ${cmd} is not supported` };
+
+    const portIndex = 18 + optLength + 1;
+    const portRemote = buffer.readUInt16BE(portIndex);
+    let addressIndex = portIndex + 2;
+    const addressType = buffer[addressIndex];
+    let addressLength = 0;
+    let addressValueIndex = addressIndex + 1;
+    let addressValue = "";
+
+    switch (addressType) {
+      case 1:
+        addressLength = 4;
+        addressValue = Array.from(buffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
+        break;
+      case 2:
+        addressLength = buffer[addressValueIndex];
+        addressValueIndex += 1;
+        addressValue = buffer.slice(addressValueIndex, addressValueIndex + addressLength).toString();
+        break;
+      case 3:
+        addressLength = 16;
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) ipv6.push(buffer.readUInt16BE(addressValueIndex + i * 2).toString(16));
+        addressValue = ipv6.join(":");
+        break;
+      default:
+        return { hasError: true, message: `invalid addressType is ${addressType}` };
+    }
+
+    if (!addressValue) return { hasError: true, message: `addressValue is empty` };
+
+    return {
+      hasError: false,
+      addressRemote: addressValue,
+      addressType: addressType,
+      portRemote: portRemote,
+      rawDataIndex: addressValueIndex + addressLength,
+      rawClientData: buffer.slice(addressValueIndex + addressLength),
+      version: Buffer.from([version, 0]),
+      isUDP: isUDP,
+    };
   }
 
   readHorseHeader(buffer) {
-    const data = buffer.slice(58);
-    if (data.length < 6 || (data[0] !== 1 && data[0] !== 3)) return { hasError: true };
-    const addrType = data[1];
-    let addrLen = 0, addrIdx = 2, addr = "";
-    
-    if (addrType === 1) { addrLen = 4; addr = Array.from(data.slice(addrIdx, addrIdx + addrLen)).join("."); }
-    else if (addrType === 3) { addrLen = data[addrIdx]; addrIdx++; addr = data.slice(addrIdx, addrIdx + addrLen).toString(); }
-    else if (addrType === 4) { addrLen = 16; addr = Array.from({length: 8}, (_, i) => data.readUInt16BE(addrIdx + i*2).toString(16)).join(":"); }
-    else return { hasError: true };
+    const dataBuffer = buffer.slice(58);
+    if (dataBuffer.length < 6) return { hasError: true, message: "invalid request data" };
 
-    const portIdx = addrIdx + addrLen;
-    return { hasError: false, addressRemote: addr, portRemote: data.readUInt16BE(portIdx), rawDataIndex: portIdx + 4, rawClientData: data.slice(portIdx + 4), version: null, isUDP: data[0] === 3 };
+    let isUDP = false;
+    const cmd = dataBuffer[0];
+    if (cmd == 3) isUDP = true;
+    else if (cmd != 1) throw new Error("Unsupported command type!");
+
+    let addressType = dataBuffer[1];
+    let addressLength = 0;
+    let addressValueIndex = 2;
+    let addressValue = "";
+
+    switch (addressType) {
+      case 1:
+        addressLength = 4;
+        addressValue = Array.from(dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join(".");
+        break;
+      case 3:
+        addressLength = dataBuffer[addressValueIndex];
+        addressValueIndex += 1;
+        addressValue = dataBuffer.slice(addressValueIndex, addressValueIndex + addressLength).toString();
+        break;
+      case 4:
+        addressLength = 16;
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) ipv6.push(dataBuffer.readUInt16BE(addressValueIndex + i * 2).toString(16));
+        addressValue = ipv6.join(":");
+        break;
+      default:
+        return { hasError: true, message: `invalid addressType is ${addressType}` };
+    }
+
+    if (!addressValue) return { hasError: true, message: `address is empty` };
+
+    const portIndex = addressValueIndex + addressLength;
+    const portRemote = dataBuffer.readUInt16BE(portIndex);
+    return {
+      hasError: false,
+      addressRemote: addressValue,
+      addressType: addressType,
+      portRemote: portRemote,
+      rawDataIndex: portIndex + 4,
+      rawClientData: dataBuffer.slice(portIndex + 4),
+      version: null,
+      isUDP: isUDP,
+    };
   }
 
-  start(port) {
-    this.httpServer = http.createServer((req, res) => this.handleHttpRequest(req, res));
-    this.wss = new WebSocket.Server({ server: this.httpServer, perMessageDeflate: false });
-    this.wss.on('connection', (ws, req) => this.handleWebSocketConnection(ws, req));
-    this.httpServer.listen(port, '0.0.0.0', () => console.log(`[SYSTEM] Hybrid Gateway Active on Port ${port}`));
+  remoteSocketToWS(remoteSocket, webSocket, responseHeader) {
+    let header = responseHeader;
+
+    remoteSocket.on('data', (chunk) => {
+      this.stats.tx += chunk.length;
+
+      if (webSocket.readyState !== WS_READY_STATE_OPEN) {
+        remoteSocket.destroy();
+        return;
+      }
+      if (header) {
+        const combined = Buffer.concat([Buffer.from(header), chunk]);
+        webSocket.send(combined);
+        header = null;
+      } else {
+        webSocket.send(chunk);
+      }
+    });
+  }
+
+  // ==================== SERVER START ====================
+
+  start(port = process.env.PORT || 3000) {
+    const server = http.createServer((req, res) => {
+      this.handleHttpRequest(req, res).catch(() => {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+      });
+    });
+
+    this.wss = new WebSocket.Server({
+      server,
+      perMessageDeflate: false,
+      // Reject upgrades on anything that is not a configured asset route
+      verifyClient: (info) => {
+        const upgradePath = url.parse(info.req.url, true).pathname;
+        return upgradePath === ROUTE_A || upgradePath === ROUTE_B;
+      }
+    });
+
+    this.wss.on('connection', (ws, req) => {
+      this.handleWebSocketConnection(ws, req);
+    });
+
+    const gracefulShutdown = () => {
+      if (this.wss) {
+        this.wss.clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) client.close();
+        });
+        this.wss.close();
+      }
+      for (const [key, connection] of this.activeUDPConnections.entries()) {
+        try { connection.socket.close(); } catch (err) {}
+      }
+      this.activeUDPConnections.clear();
+      if (this.httpServer) {
+        this.httpServer.close(() => process.exit(0));
+      }
+      setTimeout(() => { process.exit(1); }, 10000);
+    };
+
+    process.on('SIGTERM', gracefulShutdown);
+    process.on('SIGINT', gracefulShutdown);
+
+    server.listen(port, '0.0.0.0', () => {
+      console.log(`[web] listening on :${port}`);
+    });
+
+    this.httpServer = server;
   }
 }
 
-// ==================== BOOT SEQUENCE ====================
-(async () => {
-  console.log('[SYSTEM] Initializing Hybrid Core...');
-  const server = new HybridServer();
-  server.start(PORT);
-  startBackgroundServices().catch(err => console.error('[SYSTEM] Background service error:', err));
-})();
+if (require.main === module) {
+  const server = new GatewayServer();
+  const port = process.env.PORT || 3000;
+  server.start(port);
+}
+
+module.exports = GatewayServer;
